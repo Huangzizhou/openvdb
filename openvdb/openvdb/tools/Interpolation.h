@@ -55,6 +55,17 @@ OPENVDB_USE_VERSION_NAMESPACE
 namespace OPENVDB_VERSION_NAME {
 namespace tools {
 
+template <class ValueT>
+struct DiffType
+{
+    ValueT x;
+    math::Vec3<ValueT> g;
+
+    DiffType(ValueT x_): x(x_), g(0., 0., 0.) {}
+
+    DiffType(ValueT x_, math::Vec3<ValueT> g_): x(x_), g(g_) {}
+};
+
 /// @brief Provises a unified interface for sampling, i.e. interpolation.
 /// @details Order = 0: closest point
 ///          Order = 1: tri-linear
@@ -138,6 +149,11 @@ struct BoxSampler
     template<class TreeT>
     static typename TreeT::ValueType sample(const TreeT& inTree, const Vec3R& inCoord);
 
+    /// @brief Trilinearly reconstruct @a inTree at @a inCoord.
+    /// @return the reconstructed value
+    template<class TreeT>
+    static DiffType<typename TreeT::ValueType> sampleGradient(const TreeT& inTree, const Vec3R& inCoord);
+
     /// @brief Import all eight values from @a inTree to support
     /// tri-linear interpolation.
     template<class ValueT, class TreeT, size_t N>
@@ -157,6 +173,10 @@ struct BoxSampler
     /// @return the tri-linear interpolation with the unit cell coordinates @a uvw
     template<class ValueT, size_t N>
     static inline ValueT trilinearInterpolation(ValueT (&data)[N][N][N], const Vec3R& uvw);
+
+    /// @return the tri-linear interpolation with the unit cell coordinates @a uvw
+    template<class ValueT, size_t N>
+    static inline DiffType<ValueT> trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw);
 };
 
 
@@ -738,6 +758,35 @@ BoxSampler::trilinearInterpolation(ValueT (&data)[N][N][N], const Vec3R& uvw)
                 uvw[0]);
 }
 
+template<class ValueT, size_t N>
+inline DiffType<ValueT>
+BoxSampler::trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw)
+{
+    auto _interpolate = [](const DiffType<ValueT>& a, const DiffType<ValueT>& b, const DiffType<ValueT>& weight)
+    {
+        OPENVDB_NO_TYPE_CONVERSION_WARNING_BEGIN
+        const DiffType<ValueT> temp{(b.x - a.x) * weight.x, (b.x - a.x) * weight.g + (b.g - a.g) * weight.x};
+        OPENVDB_NO_TYPE_CONVERSION_WARNING_END
+        return DiffType<ValueT>{a.x + temp.x, a.g + temp.g};
+    };
+
+    // Trilinear interpolation:
+    // The eight surrounding latice values are used to construct the result. \n
+    // result(x,y,z) =
+    //     v000 (1-x)(1-y)(1-z) + v001 (1-x)(1-y)z + v010 (1-x)y(1-z) + v011 (1-x)yz
+    //   + v100 x(1-y)(1-z)     + v101 x(1-y)z     + v110 xy(1-z)     + v111 xyz
+
+    return  _interpolate(
+                _interpolate(
+                    _interpolate(DiffType<ValueT>(data[0][0][0]), DiffType<ValueT>(data[0][0][1]), DiffType<ValueT>(uvw[2], math::Vec3<ValueT>(0., 0., 1.))),
+                    _interpolate(DiffType<ValueT>(data[0][1][0]), DiffType<ValueT>(data[0][1][1]), DiffType<ValueT>(uvw[2], math::Vec3<ValueT>(0., 0., 1.))),
+                    DiffType<ValueT>(uvw[1], math::Vec3<ValueT>(0., 1., 0.))),
+                _interpolate(
+                    _interpolate(DiffType<ValueT>(data[1][0][0]), DiffType<ValueT>(data[1][0][1]), DiffType<ValueT>(uvw[2], math::Vec3<ValueT>(0., 0., 1.))),
+                    _interpolate(DiffType<ValueT>(data[1][1][0]), DiffType<ValueT>(data[1][1][1]), DiffType<ValueT>(uvw[2], math::Vec3<ValueT>(0., 0., 1.))),
+                    DiffType<ValueT>(uvw[1], math::Vec3<ValueT>(0., 1., 0.))),
+                DiffType<ValueT>(uvw[0], math::Vec3<ValueT>(1., 0., 0.)));
+}
 
 template<class TreeT>
 inline bool
@@ -777,6 +826,24 @@ BoxSampler::sample(const TreeT& inTree, const Vec3R& inCoord)
     BoxSampler::getValues(data, inTree, Coord(inIdx));
 
     return BoxSampler::trilinearInterpolation(data, uvw);
+}
+
+template<class TreeT>
+inline DiffType<typename TreeT::ValueType>
+BoxSampler::sampleGradient(const TreeT& inTree, const Vec3R& inCoord)
+{
+    using ValueT = typename TreeT::ValueType;
+
+    const Vec3i inIdx = local_util::floorVec3(inCoord);
+    const Vec3R uvw = inCoord - inIdx;
+
+    // Retrieve the values of the eight voxels surrounding the
+    // fractional source coordinates.
+    ValueT data[2][2][2];
+
+    BoxSampler::getValues(data, inTree, Coord(inIdx));
+
+    return BoxSampler::trilinearInterpolationGradient(data, uvw);
 }
 
 

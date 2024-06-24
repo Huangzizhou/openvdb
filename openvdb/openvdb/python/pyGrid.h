@@ -26,6 +26,8 @@
 #include <openvdb/tools/ChangeBackground.h>
 #include <openvdb/tools/Prune.h>
 #include <openvdb/tools/SignedFloodFill.h>
+#include <openvdb/points/PointConversion.h>
+#include <openvdb/points/PointSample.h>
 #include "pyutil.h"
 #include "pyTypeCasters.h"
 #include "pyAccessor.h" // for pyAccessor::AccessorWrap
@@ -812,6 +814,124 @@ meshToLevelSet(py::array_t<float> pointsObj, py::array_t<Index32> trianglesObj, 
 }
 
 template<typename GridType, typename std::enable_if_t<!std::is_scalar<typename GridType::ValueType>::value>* = nullptr>
+inline py::array_t<double>
+samplePoints(const GridType& grid, py::array_t<float> pointsObj)
+{
+    OPENVDB_THROW(TypeError, "sampling is supported only for scalar grids");
+}
+
+template<typename GridType, typename std::enable_if_t<std::is_scalar<typename GridType::ValueType>::value>* = nullptr>
+inline py::array_t<double>
+samplePoints(const GridType& grid, py::array_t<float> pointsObj)
+{
+    using namespace openvdb::v11_0;
+
+    auto validate2DArray = [](py::array array, ssize_t N) {
+        if (array.ndim() != 2 || array.shape(1) != N) {
+            std::ostringstream os;
+            os << "Expected a 2-dimensional numpy.ndarray with shape(1) = "<< N;
+            os << ", found " << array.ndim() << "-dimensional array with shape = (";
+            for (ssize_t i = 0; i < array.ndim(); ++i) {
+                os << array.shape(i);
+                if (i != array.ndim() - 1)
+                    os << ", ";
+            }
+            os <<").";
+            throw py::type_error(os.str());
+        }
+    };
+
+    validate2DArray(pointsObj, 3);
+    std::vector<Vec3s> pointPositions;
+    copyVecArray(pointsObj, pointPositions);
+
+    // math::Transform::Ptr xform(math::Transform::createLinearTransform(1.0f));
+    // points::PointDataGrid::Ptr points =
+    //     points::createPointDataGrid<points::NullCodec, points::PointDataGrid, Vec3s>(pointPositions,
+    //         *xform);
+    
+    // points::appendAttribute<double>(points->tree(), "density");
+    // points::sampleGrid(/*linear*/1, *points, grid, "density");
+    // points::AttributeHandle<double>::Ptr handle = points::AttributeHandle<double>::create(
+    //     points->tree().cbeginLeaf()->attributeArray("density"));
+
+    // if (handle->size() != pointPositions.size())
+    //     throw std::runtime_error("Inconsistent size! " + std::to_string(pointPositions.size()) + " vs " + std::to_string(handle->size()));
+
+    typename GridType::ConstAccessor acc = grid.getConstAccessor();
+
+    std::vector<double> values(pointPositions.size(), 0);
+    for (int i = 0; i < pointPositions.size(); i++)
+    {
+        // values[i] = handle->get(i);
+        values[i] = tools::BoxSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+        if (std::isnan(values[i]))
+            throw std::runtime_error("Invalid sdf values!");
+    }
+    
+    std::vector<ssize_t> shape = { static_cast<ssize_t>(values.size()) };
+    std::vector<ssize_t> strides = { static_cast<ssize_t>(sizeof(double)) };
+    py::array_t<double> pointArrayObj(py::buffer_info(values.data(), sizeof(double), py::format_descriptor<double>::format(), 1, shape, strides));
+    
+    return pointArrayObj;
+}
+
+template<typename GridType, typename std::enable_if_t<!std::is_same_v<typename GridType::ValueType, float>>* = nullptr>
+inline py::array_t<double>
+samplePointsGradient(const GridType& grid, py::array_t<float> pointsObj)
+{
+    OPENVDB_THROW(TypeError, "sampling gradient is supported only for float/double grids");
+}
+
+template<typename GridType, typename std::enable_if_t<std::is_same_v<typename GridType::ValueType, float>>* = nullptr>
+inline py::array_t<double>
+samplePointsGradient(const GridType& grid, py::array_t<float> pointsObj)
+{
+    using namespace openvdb::v11_0;
+
+    auto validate2DArray = [](py::array array, ssize_t N) {
+        if (array.ndim() != 2 || array.shape(1) != N) {
+            std::ostringstream os;
+            os << "Expected a 2-dimensional numpy.ndarray with shape(1) = "<< N;
+            os << ", found " << array.ndim() << "-dimensional array with shape = (";
+            for (ssize_t i = 0; i < array.ndim(); ++i) {
+                os << array.shape(i);
+                if (i != array.ndim() - 1)
+                    os << ", ";
+            }
+            os <<").";
+            throw py::type_error(os.str());
+        }
+    };
+
+    validate2DArray(pointsObj, 3);
+    std::vector<Vec3s> pointPositions;
+    copyVecArray(pointsObj, pointPositions);
+
+    typename GridType::ConstAccessor acc = grid.getConstAccessor();
+
+    std::vector<double> values(pointPositions.size() * 4, 0.);
+    for (int i = 0; i < pointPositions.size(); i++)
+    {
+        auto tmp = tools::BoxSampler::sampleGradient(acc, grid.worldToIndex(pointPositions[i]));
+        tmp.g = tmp.g * grid.voxelSize();
+        if (std::isnan(tmp.x))
+            throw std::runtime_error("Invalid sdf values!");
+        
+        values[i * 4] = tmp.x;
+        values[i * 4 + 1] = tmp.g.x();
+        values[i * 4 + 2] = tmp.g.y();
+        values[i * 4 + 3] = tmp.g.z();
+    }
+    
+    std::vector<ssize_t> shape = { static_cast<ssize_t>(pointPositions.size()), 4 };
+    std::vector<ssize_t> strides = { 4 * static_cast<ssize_t>(sizeof(double)), static_cast<ssize_t>(sizeof(double)) };
+    py::array_t<double> pointArrayObj(py::buffer_info(values.data(), sizeof(double), py::format_descriptor<double>::format(), 2, shape, strides));
+    
+    return pointArrayObj;
+}
+
+template<typename GridType, typename std::enable_if_t<!std::is_scalar<typename GridType::ValueType>::value>* = nullptr>
 inline std::tuple<py::array_t<float>, py::array_t<Index32> >
 volumeToQuadMesh(const GridType&, double)
 {
@@ -1557,6 +1677,15 @@ exportGrid(py::module_ m)
             + "-dimensional array with values\n"
             "from this grid, starting at voxel (i, j, k).").c_str())
 
+        .def("samplePoints",
+            &pyGrid::samplePoints<GridType>,
+            py::arg("points"),
+            "Evaluate values on the sample points.")
+        .def("samplePointsGradient",
+            &pyGrid::samplePointsGradient<GridType>,
+            py::arg("points"),
+            "Evaluate gradient of values on the sample points.")
+        
         .def("convertToQuads",
             &pyGrid::volumeToQuadMesh<GridType>,
             py::arg("isovalue")=0,
