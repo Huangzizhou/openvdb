@@ -12,7 +12,7 @@ project(OpenVDBUnitTests LANGUAGES CXX)
 
 include(GNUInstallDirs)
 
-set(OPENVDB_TESTS "" CACHE STRING [=[
+set(OPENVDB_TESTS "PointSample" CACHE STRING [=[
   An optional list of unit tests to build. If not provided, all unit tests will be built.
   Tests should be listed without the Test prefix or the .cc suffix, for example the string
   \"Activate;NodeManager\" would build just the TestActivate.cc and TestNodeManager.cc
