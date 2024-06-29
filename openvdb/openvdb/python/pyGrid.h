@@ -26,8 +26,10 @@
 #include <openvdb/tools/ChangeBackground.h>
 #include <openvdb/tools/Prune.h>
 #include <openvdb/tools/SignedFloodFill.h>
+#include <openvdb/math/Vec3.h>
 #include <openvdb/points/PointConversion.h>
 #include <openvdb/points/PointSample.h>
+#include <tbb/parallel_for.h>
 #include "pyutil.h"
 #include "pyTypeCasters.h"
 #include "pyAccessor.h" // for pyAccessor::AccessorWrap
@@ -861,13 +863,15 @@ samplePoints(const GridType& grid, py::array_t<float> pointsObj)
     typename GridType::ConstAccessor acc = grid.getConstAccessor();
 
     std::vector<double> values(pointPositions.size(), 0);
-    for (int i = 0; i < pointPositions.size(); i++)
-    {
-        // values[i] = handle->get(i);
-        values[i] = tools::BoxSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
-        if (std::isnan(values[i]))
-            throw std::runtime_error("Invalid sdf values!");
-    }
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, pointPositions.size()), [&](tbb::blocked_range<size_t>& range) {
+        for (size_t i = range.begin(); i < range.end(); i++)
+        {
+            // values[i] = handle->get(i);
+            values[i] = tools::SplineSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+            if (std::isnan(values[i]))
+                throw std::runtime_error("Invalid sdf values!");
+        }
+    });
     
     std::vector<ssize_t> shape = { static_cast<ssize_t>(values.size()) };
     std::vector<ssize_t> strides = { static_cast<ssize_t>(sizeof(double)) };
@@ -876,16 +880,16 @@ samplePoints(const GridType& grid, py::array_t<float> pointsObj)
     return pointArrayObj;
 }
 
-template<typename GridType, typename std::enable_if_t<!std::is_same_v<typename GridType::ValueType, float>>* = nullptr>
-inline py::array_t<double>
-samplePointsGradient(const GridType& grid, py::array_t<float> pointsObj)
+template<typename GridType, typename std::enable_if_t<!std::is_same_v<typename GridType::ValueType, float> && !std::is_same_v<typename GridType::ValueType, double>>* = nullptr>
+inline py::array_t<typename GridType::ValueType>
+samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj)
 {
     OPENVDB_THROW(TypeError, "sampling gradient is supported only for float/double grids");
 }
 
-template<typename GridType, typename std::enable_if_t<std::is_same_v<typename GridType::ValueType, float>>* = nullptr>
-inline py::array_t<double>
-samplePointsGradient(const GridType& grid, py::array_t<float> pointsObj)
+template<typename GridType, typename std::enable_if_t<std::is_same_v<typename GridType::ValueType, float> || std::is_same_v<typename GridType::ValueType, double>>* = nullptr>
+inline py::array_t<typename GridType::ValueType>
+samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj)
 {
     using namespace openvdb::v11_0;
 
@@ -905,28 +909,30 @@ samplePointsGradient(const GridType& grid, py::array_t<float> pointsObj)
     };
 
     validate2DArray(pointsObj, 3);
-    std::vector<Vec3s> pointPositions;
+    std::vector<math::Vec3<typename GridType::ValueType>> pointPositions;
     copyVecArray(pointsObj, pointPositions);
 
     typename GridType::ConstAccessor acc = grid.getConstAccessor();
 
-    std::vector<double> values(pointPositions.size() * 4, 0.);
-    for (int i = 0; i < pointPositions.size(); i++)
-    {
-        auto tmp = tools::BoxSampler::sampleGradient(acc, grid.worldToIndex(pointPositions[i]));
-        tmp.g = tmp.g * grid.voxelSize();
-        if (std::isnan(tmp.x))
-            throw std::runtime_error("Invalid sdf values!");
-        
-        values[i * 4] = tmp.x;
-        values[i * 4 + 1] = tmp.g.x();
-        values[i * 4 + 2] = tmp.g.y();
-        values[i * 4 + 3] = tmp.g.z();
-    }
-    
+    std::vector<typename GridType::ValueType> values(pointPositions.size() * 4, 0.);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, pointPositions.size()), [&](tbb::blocked_range<size_t>& range) {
+        for (size_t i = range.begin(); i < range.end(); i++) {
+        // for (size_t i = 0; i < pointPositions.size(); i++) {
+            auto tmp = tools::SplineSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+            tmp.g = tmp.g * grid.voxelSize();
+            if (std::isnan(tmp.x))
+                throw std::runtime_error("Invalid sdf values!");
+            
+            values[i * 4] = tmp.x;
+            values[i * 4 + 1] = tmp.g.x();
+            values[i * 4 + 2] = tmp.g.y();
+            values[i * 4 + 3] = tmp.g.z();
+        }
+    });
+
     std::vector<ssize_t> shape = { static_cast<ssize_t>(pointPositions.size()), 4 };
-    std::vector<ssize_t> strides = { 4 * static_cast<ssize_t>(sizeof(double)), static_cast<ssize_t>(sizeof(double)) };
-    py::array_t<double> pointArrayObj(py::buffer_info(values.data(), sizeof(double), py::format_descriptor<double>::format(), 2, shape, strides));
+    std::vector<ssize_t> strides = { 4 * static_cast<ssize_t>(sizeof(typename GridType::ValueType)), static_cast<ssize_t>(sizeof(typename GridType::ValueType)) };
+    py::array_t<typename GridType::ValueType> pointArrayObj(py::buffer_info(values.data(), sizeof(typename GridType::ValueType), py::format_descriptor<typename GridType::ValueType>::format(), 2, shape, strides));
     
     return pointArrayObj;
 }

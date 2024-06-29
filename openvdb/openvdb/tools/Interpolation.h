@@ -179,6 +179,62 @@ struct BoxSampler
     static inline DiffType<ValueT> trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw);
 };
 
+struct SplineSampler
+{
+    static const char* name() { return "spline"; }
+    static int radius() { return 1; }
+    static bool mipmap() { return true; }
+    static bool consistent() { return true; }
+    static bool staggered() { return false; }
+    static size_t order() { return 3; }
+
+    /// @brief reconstruct @a inTree at @a inCoord
+    /// and store the result in @a result.
+    /// @return @c true if any one of the sampled values is active.
+    template<class TreeT>
+    static bool sample(const TreeT& inTree, const Vec3R& inCoord,
+                       typename TreeT::ValueType& result);
+
+    /// @brief reconstruct @a inTree at @a inCoord.
+    /// @return the reconstructed value
+    template<class TreeT>
+    static typename TreeT::ValueType sample(const TreeT& inTree, const Vec3R& inCoord);
+
+    /// @brief reconstruct @a inTree at @a inCoord.
+    /// @return the reconstructed value
+    template<class TreeT>
+    static DiffType<typename TreeT::ValueType> sampleGradient(const TreeT& inTree, const Vec3R& inCoord);
+
+    /// @brief Import all eight values from @a inTree to support
+    /// tri-linear interpolation.
+    template<class ValueT, class TreeT, size_t N>
+    static inline void getValues(ValueT (&data)[N][N][N], const TreeT& inTree, Coord ijk);
+
+    /// @brief Import all eight values from @a inTree to support
+    /// tri-linear interpolation.
+    /// @return @c true if any of the eight values are active
+    template<class ValueT, class TreeT, size_t N>
+    static inline bool probeValues(ValueT (&data)[N][N][N], const TreeT& inTree, Coord ijk);
+
+    /// @brief Find the minimum and maximum values of the eight cell
+    /// values in @ data.
+    template<class ValueT, size_t N>
+    static inline void extrema(ValueT (&data)[N][N][N], ValueT& vMin, ValueT& vMax);
+
+    /// @return the tri-linear interpolation with the unit cell coordinates @a uvw
+    template<class ValueT, size_t N>
+    static inline ValueT trilinearInterpolation(ValueT (&data)[N][N][N], const Vec3R& uvw);
+
+    /// @return the tri-linear interpolation with the unit cell coordinates @a uvw
+    template<class ValueT, size_t N>
+    static inline DiffType<ValueT> trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw);
+
+    template<class ValueT>
+    static inline ValueT spline(const ValueT& x);
+
+    template<class ValueT>
+    static inline ValueT spline_deriv(const ValueT& x);
+};
 
 struct QuadraticSampler
 {
@@ -846,6 +902,225 @@ BoxSampler::sampleGradient(const TreeT& inTree, const Vec3R& inCoord)
     return BoxSampler::trilinearInterpolationGradient(data, uvw);
 }
 
+
+//////////////////////////////////////// SplineSampler
+
+template<class ValueT>
+inline ValueT 
+SplineSampler::spline(const ValueT& x)
+{
+    ValueT absx = abs(x);
+    if (absx >= 2)
+        return 0.;
+    if (absx >= 1)
+    {
+        ValueT tmp = 2. - absx;
+        return tmp * tmp * tmp / 6.;
+    }
+    
+    return 2. / 3. + (0.5 * absx - 1) * x * x;
+}
+
+template<class ValueT>
+inline ValueT 
+SplineSampler::spline_deriv(const ValueT& x)
+{
+    ValueT absx = abs(x);
+    if (absx >= 2)
+        return 0.;
+    if (absx >= 1)
+    {
+        ValueT tmp = 2. - absx;
+        return -0.5 * tmp * tmp * (x > 0 ? 1 : -1);
+    }
+    
+    return x * (1.5 * absx - 2);
+}
+
+template<class ValueT, class TreeT, size_t N>
+inline void
+SplineSampler::getValues(ValueT (&data)[N][N][N], const TreeT& inTree, Coord ijk)
+{
+    static_assert(N >= 4);
+
+    Coord dijk(-1,-1,-1);
+    auto &i = dijk[0];
+    auto &j = dijk[1];
+    auto &k = dijk[2];
+    for (i = -1; i < 3; i++)
+    {
+        for (j = -1; j < 3; j++)
+        {
+            for (k = -1; k < 3; k++)
+            {
+                Coord ijk_ = ijk + dijk;
+                data[i+1][j+1][k+1] = inTree.getValue(ijk_);
+
+                if (!std::isfinite(data[i+1][j+1][k+1]))
+                    throw std::runtime_error("Invalid grid values!");
+            }
+        }
+    }
+}
+
+template<class ValueT, class TreeT, size_t N>
+inline bool
+SplineSampler::probeValues(ValueT (&data)[N][N][N], const TreeT& inTree, Coord ijk)
+{
+    bool hasActiveValues = false;
+
+    Coord dijk(-1,-1,-1);
+    auto &i = dijk[0];
+    auto &j = dijk[1];
+    auto &k = dijk[2];
+    for (i = -1; i < 3; i++)
+    {
+        for (j = -1; j < 3; j++)
+        {
+            for (k = -1; k < 3; k++)
+            {
+                Coord ijk_ = ijk + dijk;
+                hasActiveValues |= inTree.probeValue(ijk_, data[i+1][j+1][k+1]);
+            }
+        }
+    }
+
+    return hasActiveValues;
+}
+
+template<class ValueT, size_t N>
+inline void
+SplineSampler::extrema(ValueT (&data)[N][N][N], ValueT& vMin, ValueT &vMax)
+{
+    vMin = vMax = data[0][0][0];
+
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            for (int k = 0; k < 4; k++) {
+                vMax = math::Max(vMax, data[i][j][k]);
+                vMin = math::Min(vMin, data[i][j][k]);
+            }
+        }
+    }
+}
+
+
+template<class ValueT, size_t N>
+inline ValueT
+SplineSampler::trilinearInterpolation(ValueT (&data)[N][N][N], const Vec3R& uvw)
+{
+    ValueT basis[3][4];
+    for (int d = 0; d < 3; d++) {
+        basis[d][0] = spline(uvw[d] + 1);
+        basis[d][1] = spline(uvw[d]);
+        basis[d][2] = spline(1 - uvw[d]);
+        basis[d][3] = spline(2 - uvw[d]);    
+    }
+    
+    ValueT out = 0.;
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            for (int k = 0; k < 4; k++) {
+                out += data[i][j][k] * basis[0][i] * basis[1][j] * basis[2][k];
+            }
+        }
+    }
+
+    return out;
+}
+
+template<class ValueT, size_t N>
+inline DiffType<ValueT>
+SplineSampler::trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw)
+{
+    ValueT basis[3][4];
+    ValueT deriv[3][4];
+    for (int d = 0; d < 3; d++) {
+        basis[d][0] = spline(uvw[d] + 1);
+        deriv[d][0] = spline_deriv(uvw[d] + 1);
+
+        basis[d][1] = spline(uvw[d]);
+        deriv[d][1] = spline_deriv(uvw[d]);
+
+        basis[d][2] = spline(1 - uvw[d]);
+        deriv[d][2] = -spline_deriv(1 - uvw[d]);
+
+        basis[d][3] = spline(2 - uvw[d]);
+        deriv[d][3] = -spline_deriv(2 - uvw[d]);
+    }
+    
+    DiffType<ValueT> out(0.);
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            for (int k = 0; k < 4; k++) {
+                out.x +=    data[i][j][k] * basis[0][i] * basis[1][j] * basis[2][k];
+                out.g[0] += data[i][j][k] * deriv[0][i] * basis[1][j] * basis[2][k];
+                out.g[1] += data[i][j][k] * basis[0][i] * deriv[1][j] * basis[2][k];
+                out.g[2] += data[i][j][k] * basis[0][i] * basis[1][j] * deriv[2][k];
+            }
+        }
+    }
+
+    return out;
+}
+
+template<class TreeT>
+inline bool
+SplineSampler::sample(const TreeT& inTree, const Vec3R& inCoord,
+                   typename TreeT::ValueType& result)
+{
+    using ValueT = typename TreeT::ValueType;
+
+    const Vec3i inIdx = local_util::floorVec3(inCoord);
+    const Vec3R uvw = inCoord - inIdx;
+
+    // Retrieve the values of the eight voxels surrounding the
+    // fractional source coordinates.
+    ValueT data[4][4][4];
+
+    const bool hasActiveValues = SplineSampler::probeValues(data, inTree, Coord(inIdx));
+
+    result = SplineSampler::trilinearInterpolation(data, uvw);
+
+    return hasActiveValues;
+}
+
+
+template<class TreeT>
+inline typename TreeT::ValueType
+SplineSampler::sample(const TreeT& inTree, const Vec3R& inCoord)
+{
+    using ValueT = typename TreeT::ValueType;
+
+    const Vec3i inIdx = local_util::floorVec3(inCoord);
+    const Vec3R uvw = inCoord - inIdx;
+
+    // Retrieve the values of the eight voxels surrounding the
+    // fractional source coordinates.
+    ValueT data[4][4][4];
+
+    SplineSampler::getValues(data, inTree, Coord(inIdx));
+
+    return SplineSampler::trilinearInterpolation(data, uvw);
+}
+
+template<class TreeT>
+inline DiffType<typename TreeT::ValueType>
+SplineSampler::sampleGradient(const TreeT& inTree, const Vec3R& inCoord)
+{
+    using ValueT = typename TreeT::ValueType;
+
+    const Vec3i inIdx = local_util::floorVec3(inCoord);
+    const Vec3R uvw = inCoord - inIdx;
+
+    // Retrieve the values of the eight voxels surrounding the
+    // fractional source coordinates.
+    ValueT data[4][4][4];
+
+    SplineSampler::getValues(data, inTree, Coord(inIdx));
+
+    return SplineSampler::trilinearInterpolationGradient(data, uvw);
+}
 
 //////////////////////////////////////// QuadraticSampler
 
