@@ -157,20 +157,20 @@ TEST_F(TestPointSample, testPointSample)
 
     {
         // my test
-        FloatGrid::Ptr grid;
+        DoubleGrid::Ptr grid;
         {
-            std::vector<Vec3s> points;
+            std::vector<Vec3d> points;
             std::vector<Vec4I> quads;
 
             // cube vertices
-            points.push_back(Vec3s(2, 2, 2)); // 0       6--------7
-            points.push_back(Vec3s(5, 2, 2)); // 1      /|       /|
-            points.push_back(Vec3s(2, 5, 2)); // 2     2--------3 |
-            points.push_back(Vec3s(5, 5, 2)); // 3     | |      | |
-            points.push_back(Vec3s(2, 2, 5)); // 4     | 4------|-5
-            points.push_back(Vec3s(5, 2, 5)); // 5     |/       |/
-            points.push_back(Vec3s(2, 5, 5)); // 6     0--------1
-            points.push_back(Vec3s(5, 5, 5)); // 7
+            points.push_back(Vec3d(2, 2, 2)); // 0       6--------7
+            points.push_back(Vec3d(5, 2, 2)); // 1      /|       /|
+            points.push_back(Vec3d(2, 5, 2)); // 2     2--------3 |
+            points.push_back(Vec3d(5, 5, 2)); // 3     | |      | |
+            points.push_back(Vec3d(2, 2, 5)); // 4     | 4------|-5
+            points.push_back(Vec3d(5, 2, 5)); // 5     |/       |/
+            points.push_back(Vec3d(2, 5, 5)); // 6     0--------1
+            points.push_back(Vec3d(5, 5, 5)); // 7
 
             // cube faces
             quads.push_back(Vec4I(0, 1, 3, 2)); // front
@@ -180,18 +180,18 @@ TEST_F(TestPointSample, testPointSample)
             quads.push_back(Vec4I(2, 3, 7, 6)); // top
             quads.push_back(Vec4I(0, 4, 5, 1)); // bottom
 
-            math::Transform::Ptr xform = math::Transform::createLinearTransform();
+            math::Transform::Ptr xform = math::Transform::createLinearTransform(voxelSize);
 
-            tools::QuadAndTriangleDataAdapter<Vec3s, Vec4I> mesh(points, quads);
+            tools::QuadAndTriangleDataAdapter<Vec3d, Vec4I> mesh(points, quads);
 
-            grid = tools::meshToVolume<FloatGrid>(mesh, *xform);
+            grid = tools::meshToVolume<DoubleGrid>(mesh, *xform, 10, 10);
         }
 
-        FloatGrid::ConstAccessor acc = grid->getConstAccessor();
+        DoubleGrid::ConstAccessor acc = grid->getConstAccessor();
 
-        math::Transform::Ptr xform(math::Transform::createLinearTransform(1.0f));
-        std::vector<Vec3f> pointPositions{Vec3f(13.0690,  0.3156, -0.3133), Vec3f(13.5123,  1.0260, -0.5043)};
-        // PointDataGrid::Ptr points = points::createPointDataGrid<NullCodec, PointDataGrid, Vec3f>(
+        // math::Transform::Ptr xform(math::Transform::createLinearTransform(1.0));
+        std::vector<Vec3d> pointPositions{Vec3d(2.0690,  4.92, 3.3133), Vec3d(4.9123,  2.0260, 4.5043)};
+        // PointDataGrid::Ptr points = points::createPointDataGrid<NullCodec, PointDataGrid, Vec3d>(
         //     pointPositions, *xform);
 
         // points::appendAttribute<double>(points->tree(), "density");
@@ -204,9 +204,31 @@ TEST_F(TestPointSample, testPointSample)
         std::vector<double> values(pointPositions.size(), 0);
         for (int i = 0; i < pointPositions.size(); i++)
         {
-            values[i] = tools::BoxSampler::sample(acc, pointPositions[i] / voxelSize);
+            values[i] = tools::SplineSampler::sample(acc, pointPositions[i]);
             // values[i] = handle->get(i);
             EXPECT_TRUE (!std::isnan(values[i]));
+        }
+
+        for (int i = 0; i < pointPositions.size(); i++)
+        {
+            Vec3d p = pointPositions[i];
+            auto val = tools::SplineSampler::sampleGradient(acc, p);
+
+            const double eps = 1e-8;
+            Vec3d fd(0., 0., 0.);
+            for (int k = 0; k < 3; k++)
+            {
+                for (int d = -1; d <= 1; d += 2)
+                {
+                    Vec3d q = p;
+                    q(k) += d * eps;
+                    auto tmp = tools::SplineSampler::sampleGradient(acc, q);
+                    fd(k) += d * tmp.x;
+                }
+            }
+            fd /= (2 * eps);
+
+            EXPECT_TRUE((val.g - fd).length() < 1e-6 * val.g.length());
         }
     }
 
