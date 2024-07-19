@@ -29,6 +29,7 @@
 #include <openvdb/math/Vec3.h>
 #include <openvdb/points/PointConversion.h>
 #include <openvdb/points/PointSample.h>
+#include <openvdb/tools/Composite.h>
 #include <tbb/parallel_for.h>
 #include "pyutil.h"
 #include "pyTypeCasters.h"
@@ -817,14 +818,14 @@ meshToLevelSet(py::array_t<float> pointsObj, py::array_t<Index32> trianglesObj, 
 
 template<typename GridType, typename std::enable_if_t<!std::is_scalar<typename GridType::ValueType>::value>* = nullptr>
 inline py::array_t<double>
-samplePoints(const GridType& grid, py::array_t<float> pointsObj)
+samplePoints(const GridType& grid, py::array_t<float> pointsObj, bool use_spline)
 {
     OPENVDB_THROW(TypeError, "sampling is supported only for scalar grids");
 }
 
 template<typename GridType, typename std::enable_if_t<std::is_scalar<typename GridType::ValueType>::value>* = nullptr>
 inline py::array_t<double>
-samplePoints(const GridType& grid, py::array_t<float> pointsObj)
+samplePoints(const GridType& grid, py::array_t<float> pointsObj, bool use_spline)
 {
     using namespace openvdb::v11_0;
 
@@ -867,7 +868,10 @@ samplePoints(const GridType& grid, py::array_t<float> pointsObj)
         for (size_t i = range.begin(); i < range.end(); i++)
         {
             // values[i] = handle->get(i);
-            values[i] = tools::SplineSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+            if (use_spline)
+                values[i] = tools::SplineSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+            else
+                values[i] = tools::BoxSampler::sample(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
             if (std::isnan(values[i]))
                 throw std::runtime_error("Invalid sdf values!");
         }
@@ -882,14 +886,14 @@ samplePoints(const GridType& grid, py::array_t<float> pointsObj)
 
 template<typename GridType, typename std::enable_if_t<!std::is_same_v<typename GridType::ValueType, float> && !std::is_same_v<typename GridType::ValueType, double>>* = nullptr>
 inline py::array_t<typename GridType::ValueType>
-samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj)
+samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj, bool use_spline, bool parallel)
 {
     OPENVDB_THROW(TypeError, "sampling gradient is supported only for float/double grids");
 }
 
 template<typename GridType, typename std::enable_if_t<std::is_same_v<typename GridType::ValueType, float> || std::is_same_v<typename GridType::ValueType, double>>* = nullptr>
 inline py::array_t<typename GridType::ValueType>
-samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj)
+samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueType> pointsObj, bool use_spline, bool parallel)
 {
     using namespace openvdb::v11_0;
 
@@ -912,13 +916,33 @@ samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueT
     std::vector<math::Vec3<typename GridType::ValueType>> pointPositions;
     copyVecArray(pointsObj, pointPositions);
 
-    typename GridType::ConstAccessor acc = grid.getConstAccessor();
-
     std::vector<typename GridType::ValueType> values(pointPositions.size() * 4, 0.);
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, pointPositions.size()), [&](tbb::blocked_range<size_t>& range) {
-        for (size_t i = range.begin(); i < range.end(); i++) {
-        // for (size_t i = 0; i < pointPositions.size(); i++) {
-            auto tmp = tools::SplineSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+
+    if (parallel)
+    {
+        tbb::parallel_for(tbb::blocked_range<int>(0, pointPositions.size()), [&](tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); i++) {
+            // for (int i = 0; i < pointPositions.size(); i++) {
+                typename GridType::ConstAccessor acc = grid.getConstAccessor();
+                auto tmp = use_spline ? tools::SplineSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i])) :
+                                        tools::BoxSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
+                tmp.g = tmp.g * grid.voxelSize();
+                if (std::isnan(tmp.x))
+                    throw std::runtime_error("Invalid sdf values!");
+                
+                values[i * 4] = tmp.x;
+                values[i * 4 + 1] = tmp.g.x();
+                values[i * 4 + 2] = tmp.g.y();
+                values[i * 4 + 3] = tmp.g.z();
+            }
+        });
+    }
+    else
+    {
+        for (int i = 0; i < pointPositions.size(); i++) {
+            typename GridType::ConstAccessor acc = grid.getConstAccessor();
+            auto tmp = use_spline ? tools::SplineSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i])) :
+                                    tools::BoxSampler::sampleGradient(acc, grid.transformPtr()->worldToIndex(pointPositions[i]));
             tmp.g = tmp.g * grid.voxelSize();
             if (std::isnan(tmp.x))
                 throw std::runtime_error("Invalid sdf values!");
@@ -928,7 +952,7 @@ samplePointsGradient(const GridType& grid, py::array_t<typename GridType::ValueT
             values[i * 4 + 2] = tmp.g.y();
             values[i * 4 + 3] = tmp.g.z();
         }
-    });
+    }
 
     std::vector<ssize_t> shape = { static_cast<ssize_t>(pointPositions.size()), 4 };
     std::vector<ssize_t> strides = { 4 * static_cast<ssize_t>(sizeof(typename GridType::ValueType)), static_cast<ssize_t>(sizeof(typename GridType::ValueType)) };
@@ -1565,6 +1589,19 @@ exportGrid(py::module_ m)
     docstream << "Initialize with a background value of " << pyGrid::getZeroValue<GridType>() << ".";
     std::string docstring = docstream.str();
 
+    if constexpr (std::is_same_v<ValueT, float> || std::is_same_v<ValueT, double>)
+    {
+        m.def("csgIntersectionCopy",
+            &tools::csgIntersectionCopy<GridType>,
+            py::arg("gridA"), py::arg("gridB"));
+        m.def("csgUnionCopy",
+            &tools::csgUnionCopy<GridType>,
+            py::arg("gridA"), py::arg("gridB"));
+        m.def("csgDifferenceCopy",
+            &tools::csgDifferenceCopy<GridType>,
+            py::arg("gridA"), py::arg("gridB"));
+    }
+
     // Define the Grid wrapper class and make it the current scope.
     py::class_<GridType, GridPtr, GridBase>(m,
         /*classname=*/pyGridTypeName.c_str(),
@@ -1685,11 +1722,11 @@ exportGrid(py::module_ m)
 
         .def("samplePoints",
             &pyGrid::samplePoints<GridType>,
-            py::arg("points"),
+            py::arg("points"), py::arg("use_spline") = bool(false),
             "Evaluate values on the sample points.")
         .def("samplePointsGradient",
             &pyGrid::samplePointsGradient<GridType>,
-            py::arg("points"),
+            py::arg("points"), py::arg("use_spline") = bool(false), py::arg("use_parallel") = bool(false),
             "Evaluate gradient of values on the sample points.")
         
         .def("convertToQuads",

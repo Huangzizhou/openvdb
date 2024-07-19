@@ -189,8 +189,16 @@ TEST_F(TestPointSample, testPointSample)
 
         DoubleGrid::ConstAccessor acc = grid->getConstAccessor();
 
+        auto myrand = [](double min, double max) {
+            return min + (max - min) * (rand() % 1000) / 1000.0;
+        };
+
         // math::Transform::Ptr xform(math::Transform::createLinearTransform(1.0));
         std::vector<Vec3d> pointPositions{Vec3d(2.0690,  4.92, 3.3133), Vec3d(4.9123,  2.0260, 4.5043)};
+        for (int i = 0; i < 100; i++)
+        {
+            pointPositions.push_back(Vec3d{myrand(2, 5), myrand(2, 5), myrand(2, 5)});
+        }
         // PointDataGrid::Ptr points = points::createPointDataGrid<NullCodec, PointDataGrid, Vec3d>(
         //     pointPositions, *xform);
 
@@ -204,10 +212,24 @@ TEST_F(TestPointSample, testPointSample)
         std::vector<double> values(pointPositions.size(), 0);
         for (int i = 0; i < pointPositions.size(); i++)
         {
-            values[i] = tools::SplineSampler::sample(acc, pointPositions[i]);
+            values[i] = tools::SplineSampler::sampleGradient(acc, pointPositions[i]).x;
             // values[i] = handle->get(i);
             EXPECT_TRUE (!std::isnan(values[i]));
         }
+
+        std::vector<double> pvalues(pointPositions.size(), 0);
+        tbb::parallel_for(tbb::blocked_range<int>(0, pointPositions.size()), [&](tbb::blocked_range<int>& range) {
+            for (int i = range.begin(); i < range.end(); i++) {
+                pvalues[i] = tools::SplineSampler::sampleGradient(acc, pointPositions[i]).x;
+            }
+        });
+
+        double err = 0;
+        for (int i = 0; i < pointPositions.size(); i++)
+        {
+            err += abs(pvalues[i] - values[i]);
+        }
+        EXPECT_TRUE (err < 1e-12);
 
         for (int i = 0; i < pointPositions.size(); i++)
         {
