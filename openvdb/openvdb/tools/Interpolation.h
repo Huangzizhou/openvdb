@@ -881,6 +881,20 @@ BoxSampler::sample(const TreeT& inTree, const Vec3R& inCoord)
 
     BoxSampler::getValues(data, inTree, Coord(inIdx));
 
+    // Check if data contains different values
+    ValueT min = data[0][0][0], max = data[0][0][0];
+    for (int i = 0; i < 2; i++) {
+        for (int j = 0; j < 2; j++) {
+            for (int k = 0; k < 2; k++) {
+                min = std::min(data[i][j][k], min);
+                max = std::max(data[i][j][k], max);
+            }
+        }
+    }
+
+    if (max - min < 1e-16 * max)
+        return max;
+
     return BoxSampler::trilinearInterpolation(data, uvw);
 }
 
@@ -898,6 +912,20 @@ BoxSampler::sampleGradient(const TreeT& inTree, const Vec3R& inCoord)
     ValueT data[2][2][2];
 
     BoxSampler::getValues(data, inTree, Coord(inIdx));
+
+    // Check if data contains different values
+    // ValueT min = data[0][0][0], max = data[0][0][0];
+    // for (int i = 0; i < 2; i++) {
+    //     for (int j = 0; j < 2; j++) {
+    //         for (int k = 0; k < 2; k++) {
+    //             min = std::min(data[i][j][k], min);
+    //             max = std::max(data[i][j][k], max);
+    //         }
+    //     }
+    // }
+
+    // if (max - min < 1e-12 * fabs(max))
+    //     return DiffType<typename TreeT::ValueType>(max);
 
     return BoxSampler::trilinearInterpolationGradient(data, uvw);
 }
