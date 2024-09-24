@@ -66,6 +66,18 @@ struct DiffType
     DiffType(ValueT x_, math::Vec3<ValueT> g_): x(x_), g(g_) {}
 };
 
+template <class ValueT>
+struct HessType
+{
+    ValueT x;
+    math::Vec3<ValueT> g;
+    math::Mat3<ValueT> h;
+
+    HessType(ValueT x_): x(x_), g(0., 0., 0.), h(math::Mat3<ValueT>::zero()) {}
+
+    HessType(ValueT x_, math::Vec3<ValueT> g_, math::Mat3<ValueT> h_): x(x_), g(g_), h(h_) {}
+};
+
 /// @brief Provises a unified interface for sampling, i.e. interpolation.
 /// @details Order = 0: closest point
 ///          Order = 1: tri-linear
@@ -205,6 +217,9 @@ struct SplineSampler
     template<class TreeT>
     static DiffType<typename TreeT::ValueType> sampleGradient(const TreeT& inTree, const Vec3R& inCoord);
 
+    template<class TreeT>
+    static HessType<typename TreeT::ValueType> sampleHessian(const TreeT& inTree, const Vec3R& inCoord);
+
     /// @brief Import all eight values from @a inTree to support
     /// tri-linear interpolation.
     template<class ValueT, class TreeT, size_t N>
@@ -229,11 +244,17 @@ struct SplineSampler
     template<class ValueT, size_t N>
     static inline DiffType<ValueT> trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec3R& uvw);
 
+    template<class ValueT, size_t N>
+    static inline HessType<ValueT> trilinearInterpolationHessian(ValueT (&data)[N][N][N], const Vec3R& uvw);
+
     template<class ValueT>
     static inline ValueT spline(const ValueT& x);
 
     template<class ValueT>
-    static inline ValueT spline_deriv(const ValueT& x);
+    static inline ValueT spline_1st_deriv(const ValueT& x);
+
+    template<class ValueT>
+    static inline ValueT spline_2nd_deriv(const ValueT& x);
 };
 
 struct QuadraticSampler
@@ -951,7 +972,7 @@ SplineSampler::spline(const ValueT& x)
 
 template<class ValueT>
 inline ValueT 
-SplineSampler::spline_deriv(const ValueT& x)
+SplineSampler::spline_1st_deriv(const ValueT& x)
 {
     ValueT absx = abs(x);
     if (absx >= 2)
@@ -963,6 +984,19 @@ SplineSampler::spline_deriv(const ValueT& x)
     }
     
     return x * (1.5 * absx - 2);
+}
+
+template<class ValueT>
+inline ValueT 
+SplineSampler::spline_2nd_deriv(const ValueT& x)
+{
+    ValueT absx = abs(x);
+    if (absx >= 2)
+        return 0.;
+    if (absx >= 1)
+        return 2. - absx;
+    
+    return 3 * absx - 2;
 }
 
 template<class ValueT, class TreeT, size_t N>
@@ -1065,16 +1099,16 @@ SplineSampler::trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec
     ValueT deriv[3][4];
     for (int d = 0; d < 3; d++) {
         basis[d][0] = spline(uvw[d] + 1);
-        deriv[d][0] = spline_deriv(uvw[d] + 1);
+        deriv[d][0] = spline_1st_deriv(uvw[d] + 1);
 
         basis[d][1] = spline(uvw[d]);
-        deriv[d][1] = spline_deriv(uvw[d]);
+        deriv[d][1] = spline_1st_deriv(uvw[d]);
 
         basis[d][2] = spline(1 - uvw[d]);
-        deriv[d][2] = -spline_deriv(1 - uvw[d]);
+        deriv[d][2] = -spline_1st_deriv(1 - uvw[d]);
 
         basis[d][3] = spline(2 - uvw[d]);
-        deriv[d][3] = -spline_deriv(2 - uvw[d]);
+        deriv[d][3] = -spline_1st_deriv(2 - uvw[d]);
     }
     
     DiffType<ValueT> out(0.);
@@ -1088,6 +1122,61 @@ SplineSampler::trilinearInterpolationGradient(ValueT (&data)[N][N][N], const Vec
             }
         }
     }
+
+    return out;
+}
+
+template<class ValueT, size_t N>
+inline HessType<ValueT>
+SplineSampler::trilinearInterpolationHessian(ValueT (&data)[N][N][N], const Vec3R& uvw)
+{
+    ValueT basis[3][4];
+    ValueT deriv1[3][4];
+    ValueT deriv2[3][4];
+    for (int d = 0; d < 3; d++) {
+        basis[d][0] = spline(uvw[d] + 1);
+        deriv1[d][0] = spline_1st_deriv(uvw[d] + 1);
+        deriv2[d][0] = spline_2nd_deriv(uvw[d] + 1);
+
+        basis[d][1] = spline(uvw[d]);
+        deriv1[d][1] = spline_1st_deriv(uvw[d]);
+        deriv2[d][1] = spline_2nd_deriv(uvw[d]);
+
+        basis[d][2] = spline(1 - uvw[d]);
+        deriv1[d][2] = -spline_1st_deriv(1 - uvw[d]);
+        deriv2[d][2] = spline_2nd_deriv(1 - uvw[d]);
+
+        basis[d][3] = spline(2 - uvw[d]);
+        deriv1[d][3] = -spline_1st_deriv(2 - uvw[d]);
+        deriv2[d][3] = spline_2nd_deriv(2 - uvw[d]);
+    }
+    
+    HessType<ValueT> out(0.);
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            for (int k = 0; k < 4; k++) {
+                out.x +=    data[i][j][k] * basis[0][i] * basis[1][j] * basis[2][k];
+                out.g[0] += data[i][j][k] * deriv1[0][i] * basis[1][j] * basis[2][k];
+                out.g[1] += data[i][j][k] * basis[0][i] * deriv1[1][j] * basis[2][k];
+                out.g[2] += data[i][j][k] * basis[0][i] * basis[1][j] * deriv1[2][k];
+
+                out.h(0, 0) += data[i][j][k] * deriv2[0][i] * basis[1][j]  * basis[2][k];
+                out.h(0, 1) += data[i][j][k] * deriv1[0][i] * deriv1[1][j] * basis[2][k];
+                out.h(0, 2) += data[i][j][k] * deriv1[0][i] * basis[1][j]  * deriv1[2][k];
+
+                // out.h(1, 0) += data[i][j][k] * deriv1[0][i] * deriv1[1][j] * basis[2][k];
+                out.h(1, 1) += data[i][j][k] * basis[0][i]  * deriv2[1][j] * basis[2][k];
+                out.h(1, 2) += data[i][j][k] * basis[0][i]  * deriv1[1][j] * deriv1[2][k];
+
+                // out.h(2, 0) += data[i][j][k] * deriv1[0][i] * basis[1][j]  * deriv1[2][k];
+                // out.h(2, 1) += data[i][j][k] * basis[0][i]  * deriv1[1][j] * deriv1[2][k];
+                out.h(2, 2) += data[i][j][k] * basis[0][i]  * basis[1][j]  * deriv2[2][k];
+            }
+        }
+    }
+    out.h(2, 0) = out.h(0, 2);
+    out.h(1, 0) = out.h(0, 1);
+    out.h(2, 1) = out.h(1, 2);
 
     return out;
 }
@@ -1148,6 +1237,24 @@ SplineSampler::sampleGradient(const TreeT& inTree, const Vec3R& inCoord)
     SplineSampler::getValues(data, inTree, Coord(inIdx));
 
     return SplineSampler::trilinearInterpolationGradient(data, uvw);
+}
+
+template<class TreeT>
+inline HessType<typename TreeT::ValueType>
+SplineSampler::sampleHessian(const TreeT& inTree, const Vec3R& inCoord)
+{
+    using ValueT = typename TreeT::ValueType;
+
+    const Vec3i inIdx = local_util::floorVec3(inCoord);
+    const Vec3R uvw = inCoord - inIdx;
+
+    // Retrieve the values of the eight voxels surrounding the
+    // fractional source coordinates.
+    ValueT data[4][4][4];
+
+    SplineSampler::getValues(data, inTree, Coord(inIdx));
+
+    return SplineSampler::trilinearInterpolationHessian(data, uvw);
 }
 
 //////////////////////////////////////// QuadraticSampler
